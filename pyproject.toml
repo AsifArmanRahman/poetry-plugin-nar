@@ -1,0 +1,168 @@
+[tool.poetry]
+
+name = "poetry-plugin-nar"
+version = "0.1.0a0"
+description = "Poetry plugin for building Apache NiFi NAR bundles."
+
+license = "MIT"
+readme = "README.md"
+authors = ["Asif Arman Rahman <asifarmanrahman@gmail.com>"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+keywords = ["poetry", "plugin", "nifi", "nar"]
+
+
+[tool.poetry.dependencies]
+
+python = "^3.9"
+poetry = "^1.8.3"
+poetry-core = "^1.9.0"
+poetry-plugin-export = "^1.8.0"
+
+
+[tool.poetry.group.dev.dependencies]
+
+mypy = "^1.11.2"
+pre-commit = "^3.8.0"
+pytest = "^8.3.3"
+pytest-cov = "^5.0.0"
+pytest-mock = "^3.14.0"
+
+
+[tool.poetry.group.workflow]
+
+# only used in github actions
+optional = true
+
+
+[tool.poetry.group.workflow.dependencies]
+
+pytest-github-actions-annotate-failures = "^0.2.0"
+
+
+[tool.poetry.plugins."poetry.application.plugin"]
+
+build = "poetry_plugin_nar.plugin:BuildPlugin"
+
+
+[tool.ruff]
+
+fix = true
+preview = true
+target-version = "py39"
+line-length = 78
+include = ["tests", "poetry_plugin_nar", "pyproject.toml"]
+extend-exclude = [
+    "docs/*",
+    # External to the project's coding standards
+    "tests/**/fixtures/*",
+]
+
+
+[tool.ruff.format]
+
+quote-style = "double"
+
+
+[tool.ruff.lint]
+
+extend-select = [
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "ERA", # flake8-eradicate/eradicate
+  "I",   # isort
+  "N",   # pep8-naming
+  "PIE", # flake8-pie
+  "PGH", # pygrep
+  "RUF", # ruff checks
+  "SIM", # flake8-simplify
+  "T20", # flake8-print
+  "TCH", # flake8-type-checking
+  "TID", # flake8-tidy-imports
+  "CPY", # flake8-copyright
+  "UP",  # pyupgrade
+]
+ignore = [
+  "B904", # use 'raise ... from err'
+  "B905", # use explicit 'strict=' parameter with 'zip()'
+  "N818", # Exception name should be named with an Error suffix
+]
+extend-safe-fixes = [
+  "TCH", # move import from and to TYPE_CHECKING blocks
+]
+unfixable = [
+  "ERA", # do not autoremove commented out code
+]
+
+
+[tool.ruff.lint.isort]
+
+force-single-line = true
+lines-between-types = 1
+lines-after-imports = 2
+known-first-party = ["poetry_plugin_nar"]
+known-third-party = ["poetry", "poetry-core", "poetry-plugin-export"]
+required-imports = ["from __future__ import annotations"]
+
+
+[tool.ruff.lint.flake8-copyright]
+
+notice-rgx = "# SPDX-FileCopyrightText: © 2024 Asif Arman Rahman <asifarmanrahman@gmail.com>\n#\n# SPDX-License-Identifier: MIT\n"
+
+
+[tool.ruff.lint.flake8-tidy-imports]
+
+ban-relative-imports = "all"
+
+
+[tool.mypy]
+
+files = ["poetry_plugin_nar", "tests"]
+explicit_package_bases = true
+namespace_packages = true
+show_error_codes = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+]
+strict = true
+exclude = ["tests/fixtures/"]
+
+
+# use of importlib-metadata backport makes it impossible to satisfy mypy
+# without some ignores: but we get a different set of ignores at different
+# python versions.
+#
+# <https://github.com/python/mypy/issues/8823>, meanwhile suppress that
+# warning.
+[[tool.mypy.overrides]]
+
+module = [
+  'poetry_plugin_nar',
+]
+warn_unused_ignores = true
+
+
+[tool.coverage.report]
+
+# Regexes for lines to exclude from consideration
+exclude_also = [
+    # Exclude type checking code
+    "if TYPE_CHECKING:"
+]
+
+
+[build-system]
+
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
