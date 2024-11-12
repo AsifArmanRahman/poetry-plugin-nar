@@ -1,0 +1,91 @@
+name: tests
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+
+jobs:
+
+  tests:
+    name: ${{ matrix.image }} / ${{ matrix.python-version }}
+
+    defaults:
+      run:
+        shell: bash
+
+    runs-on: "${{ matrix.image }}-latest"
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu, windows, macOS]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        poetry-version: ["1.8.4"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Get full Python version
+        id: python
+        run: |
+          echo \
+          "version=$(python -c "import sys; print('-'.join(str(v) for v in sys.version_info))")" \
+          >> $GITHUB_OUTPUT
+
+      - name: Bootstrap poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python - -y --version ${{ matrix.poetry-version }}
+
+      - name: Update PATH for Linux and MacOS
+        if: ${{ matrix.image != 'windows' }}
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Update Path for Windows
+        if: ${{ matrix.image == 'windows' }}
+        run: |
+          echo "$APPDATA\Python\Scripts" >> $GITHUB_PATH
+
+      - name: Configure poetry
+        run: poetry config virtualenvs.in-project true
+
+      - name: Set up cache
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.python.outputs.version }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Check cache health
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          timeout 10s poetry run pip --version || rm -rf .venv
+
+      - name: Check lock file
+        run: |
+          poetry lock --check
+
+      - name: Install dependencies
+        run: |
+          poetry install --with workflow
+
+      - name: Type check with mypy
+        run: |
+          poetry run mypy
+
+      - name: Test with pytest
+        run: |
+          poetry run python -m pytest -v --cov=poetry_plugin_nar --cov-report=term-missing
