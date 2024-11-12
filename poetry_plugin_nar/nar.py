@@ -7,20 +7,22 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 import tempfile
 
 from datetime import datetime
 from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from subprocess import PIPE
 from subprocess import check_call
 from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED
 from zipfile import ZipFile
+from zipfile import ZipInfo
 
 from poetry.core.masonry.builders.builder import Builder
 from poetry.core.masonry.builders.builder import BuildIncludeFile
-from poetry.core.masonry.builders.wheel import WheelBuilder
 from poetry.core.masonry.utils.helpers import distribution_name
 from poetry.core.masonry.utils.helpers import normalize_file_permissions
 from poetry.core.utils.helpers import temporary_directory
@@ -28,6 +30,8 @@ from poetry.core.utils.helpers import temporary_directory
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from poetry.core.masonry.utils.module import Module
 
 # as builders have their own logging format, and can't be extended
 # as of now, we set the logger for NarBuilder to the same as Builder
@@ -48,6 +52,54 @@ Nar-Version: {version}
 class NarBuilder(Builder):
     format = "nar"
 
+    @cached_property
+    def _module(self) -> Module:
+        from poetry.core.masonry.utils.module import Module
+
+        packages = []
+
+        for p in self._package.packages:
+            formats = p.get("format") or None
+
+            # Default to "nar" format when `format` key is not
+            # provided in the inline include table.
+            if formats is None:
+                formats = ["nar"]
+
+            if not isinstance(formats, list):
+                formats = [formats]
+
+            if (
+                formats
+                and self.format
+                and self.format not in formats
+                and not self._ignore_packages_formats
+            ):
+                continue
+
+            packages.append(p)
+
+        includes = []
+        for include in self._package.include:
+            formats = include.get("format", [])
+
+            if (
+                formats
+                and self.format
+                and self.format not in formats
+                and not self._ignore_packages_formats
+            ):
+                continue
+
+            includes.append(include)
+
+        return Module(
+            self._package.name,
+            self._path.as_posix(),
+            packages=packages,
+            includes=includes,
+        )
+
     @property
     def filename(self) -> str:
         name = distribution_name(self._package.name)
@@ -63,6 +115,32 @@ class NarBuilder(Builder):
         if not target_dir.exists():
             target_dir.mkdir(parents=True)
 
+        # Create a temporary nar file
+        fd, tmp_file_path = tempfile.mkstemp(suffix=".nar")
+
+        # Normalize permission bits in accord
+        # with poetry WheelBuilder
+        st_mode = os.stat(tmp_file_path).st_mode
+        new_mode = normalize_file_permissions(st_mode)
+        os.chmod(tmp_file_path, new_mode)
+
+        with temporary_directory(prefix=self._package.name) as temp_dir:
+            tmp_package_dir = Path(temp_dir)
+
+            self._copy_module(tmp_package_dir)
+            self._prepare_metadata(tmp_package_dir)
+
+            if self._package.requires:
+                self._prepare_dependencies(target_dir, tmp_package_dir)
+
+            with (
+                os.fdopen(fd, "w+b") as fd_file,
+                ZipFile(
+                    fd_file, mode="w", compression=ZIP_DEFLATED
+                ) as zip_file,
+            ):
+                self._copy_folder(zip_file, tmp_package_dir)
+
         # target file path
         target = target_dir / self.filename
 
@@ -70,41 +148,102 @@ class NarBuilder(Builder):
         if target.exists():
             target.unlink()
 
-        # Create a temporary nar file
-        fd, temp_file_path = tempfile.mkstemp(suffix=".nar")
-
-        # Normalize permission bits in accord with poetry WheelBuilder
-        st_mode = os.stat(temp_file_path).st_mode
-        new_mode = normalize_file_permissions(st_mode)
-        os.chmod(temp_file_path, new_mode)
-
-        with (
-            os.fdopen(fd, "w+b") as fd_file,
-            ZipFile(fd_file, mode="w", compression=ZIP_DEFLATED) as zip_file,
-        ):
-            # Copy the mentioned package/s to the nar file
-            self._copy_module(zip_file)
-
-            with temporary_directory() as temp_dir:
-                self._prepare_metadata(Path(temp_dir))
-                self._copy_folder(zip_file, Path(temp_dir), "META-INF")
-
-            with temporary_directory() as temp_dir:
-                self._prepare_dependencies(target_dir, Path(temp_dir))
-                self._copy_folder(
-                    zip_file, Path(temp_dir), "NAR-INF/bundled-dependencies"
-                )
-
-        # rename and move the temporary nar file to the target file path
-        shutil.move(temp_file_path, target.as_posix())
+        # rename and move the temporary nar file to the target path
+        shutil.move(tmp_file_path, target)
 
         logger.info(f"Built <comment>{self.filename}</comment>")
         return target
 
-    def _copy_module(self, nar: ZipFile) -> None:
-        WheelBuilder(poetry=self._poetry)._copy_module(nar)
+    def find_files_to_add(
+        self, exclude_build: bool = True
+    ) -> set[BuildIncludeFile]:
+        """
+        Finds all files to add to the nar package.
+        """
+        from poetry.core.masonry.utils.package_include import PackageInclude
 
-    def _prepare_metadata(self, metadata_dir: Path) -> None:
+        to_add = set()
+
+        for include in self._module.includes:
+            include.refresh()
+            formats = include.formats or ["nar"]
+
+            for file in include.elements:
+                if "__pycache__" in str(file):
+                    continue
+
+                if (
+                    isinstance(include, PackageInclude)
+                    and include.source
+                    and self.format == "nar"
+                ):
+                    source_root = include.base
+                else:
+                    source_root = self._path
+
+                if (
+                    isinstance(include, PackageInclude)
+                    and include.target
+                    and self.format == "nar"
+                ):
+                    target_dir = include.target
+                else:
+                    target_dir = None
+
+                if file.is_dir():
+                    if self.format in formats:
+                        for current_file in file.glob("**/*"):
+                            include_file = BuildIncludeFile(
+                                path=current_file,
+                                project_root=self._path,
+                                source_root=source_root,
+                                target_dir=target_dir,
+                            )
+
+                            if not (
+                                current_file.is_dir()
+                                or self.is_excluded(
+                                    include_file.relative_to_source_root()
+                                )
+                            ):
+                                to_add.add(include_file)
+                    continue
+
+                include_file = BuildIncludeFile(
+                    path=file,
+                    project_root=self._path,
+                    source_root=source_root,
+                    target_dir=target_dir,
+                )
+
+                if self.is_excluded(
+                    include_file.relative_to_project_root()
+                ) and isinstance(include, PackageInclude):
+                    continue
+
+                if file.suffix == ".pyc":
+                    continue
+
+                logger.debug(f"Adding: {file}")
+                to_add.add(include_file)
+
+        return to_add
+
+    def _copy_module(self, nar_package_dir: Path) -> None:
+        to_add = self.find_files_to_add()
+
+        # sorting everything so the order is stable.
+        for file in sorted(to_add, key=lambda x: x.path):
+            dst = nar_package_dir / file.relative_to_target_root()
+            dst.parent.mkdir(parents=True, exist_ok=True)
+
+            shutil.copy2(file.path, dst)
+
+    def _prepare_metadata(self, nar_package_dir: Path) -> None:
+        # Create the metadata directory
+        metadata_dir = nar_package_dir / "META-INF"
+        metadata_dir.mkdir()
+
         # Copy the legal files
         for legal_file in self._get_legal_files():
             if not legal_file.is_file():
@@ -113,7 +252,7 @@ class NarBuilder(Builder):
 
             dest = metadata_dir / legal_file.relative_to(self._path)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(legal_file, dest)
+            shutil.copy2(legal_file, dest)
 
         # Copy readme file/s if mentioned in pyproject.toml
         if "readme" in self._poetry.local_config:
@@ -125,7 +264,7 @@ class NarBuilder(Builder):
                     project_root=self._path,
                     source_root=self._path,
                 )
-                shutil.copy(file.path, metadata_dir / Path(readme).name)
+                shutil.copy2(file.path, metadata_dir / Path(readme).name)
             else:
                 for r in readme:
                     file = BuildIncludeFile(
@@ -133,7 +272,7 @@ class NarBuilder(Builder):
                         project_root=self._path,
                         source_root=self._path,
                     )
-                    shutil.copy(file.path, metadata_dir / Path(r).name)
+                    shutil.copy2(file.path, metadata_dir / Path(r).name)
 
         # Write the MANIFEST.MF file
         with open(
@@ -149,58 +288,66 @@ class NarBuilder(Builder):
                 )
             )
 
-    def _copy_folder(self, nar: ZipFile, source: Path, target: str) -> None:
-        for file in sorted(source.glob("**/*")):
-            if not file.is_file():
+    def _copy_folder(self, nar: ZipFile, nar_package_dir: Path) -> None:
+        for file in sorted(nar_package_dir.glob("**/*")):
+            if not (file.is_file() or file.is_dir()):
                 continue
 
-            rel_path = file.relative_to(source)
-            target_path = target / rel_path
+            target_path = file.relative_to(nar_package_dir)
             self._add_file(nar, file, target_path)
 
-    def _prepare_dependencies(self, cache: Path, deps_dir: Path) -> None:
+    def _prepare_dependencies(
+        self, target_dir: Path, nar_package_dir: Path
+    ) -> None:
         # Create a temporary requirements.txt file
-        _, temp_file_path = tempfile.mkstemp(suffix=".txt")
+        fd, tmp_file_path = tempfile.mkstemp(suffix=".txt")
 
-        # command to export the requirements to a requirements.txt file
-        command = [
-            "poetry",
-            "export",
-            "-f",
-            "requirements.txt",
-            "--output",
-            Path(temp_file_path).as_posix(),
-        ]
+        try:
+            # command to export the requirements to a requirements.txt file
+            command = [
+                "poetry",
+                "export",
+                "-f",
+                "requirements.txt",
+                "-o",
+                tmp_file_path,
+            ]
 
-        self._execute_command(command)
+            self._execute_command(command)
 
-        # directory to store the pip cache
-        cache_dir = cache / "pip-cache"
+            # directory to store the pip cache
+            cache_dir = target_dir / "pip-cache"
 
-        # if the cache directory does not exist, create it
-        if not cache_dir.exists():
-            cache_dir.mkdir()
+            if not cache_dir.exists():
+                cache_dir.mkdir()
 
-        # command to download the dependencies
-        # to the dependency unpack directory
-        command = [
-            self.executable.absolute().as_posix(),
-            "-m",
-            "pip",
-            "install",
-            "-r",
-            f"{Path(temp_file_path).absolute().as_posix()}",
-            "--upgrade",
-            "--no-python-version-warning",
-            "--no-input",
-            "--cache-dir",
-            cache_dir.absolute().as_posix(),
-            "--quiet",
-            "--target",
-            deps_dir.absolute().as_posix(),
-        ]
+            # directory to unpack the dependencies
+            deps_dir = nar_package_dir / "NAR-INF" / "bundled-dependencies"
+            deps_dir.mkdir(parents=True)
 
-        self._execute_command(command)
+            # command to download the dependencies
+            # to the dependency unpack directory
+            command = [
+                str(self.executable),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                tmp_file_path,
+                "--upgrade",
+                "--no-python-version-warning",
+                "--no-input",
+                "--cache-dir",
+                str(cache_dir),
+                "--quiet",
+                "--target",
+                str(deps_dir),
+            ]
+
+            self._execute_command(command)
+        finally:
+            os.close(fd)
+            os.remove(tmp_file_path)
 
     def _execute_command(self, command: list[str]) -> None:
         # run the command to export the requirements
@@ -209,4 +356,26 @@ class NarBuilder(Builder):
     def _add_file(
         self, nar: ZipFile, full_path: Path, rel_path: Path
     ) -> None:
-        WheelBuilder(poetry=self._poetry)._add_file(nar, full_path, rel_path)
+        # We always want to have /-separated paths
+        # in the zip file and in RECORD
+        rel_path_name = (
+            rel_path.as_posix()
+            if full_path.is_file()
+            else rel_path.as_posix() + "/"
+        )
+        zip_info = ZipInfo(rel_path_name)
+
+        # Normalize permission bits to either 755 (executable) or 644
+        st_mode = full_path.stat().st_mode
+        new_mode = normalize_file_permissions(st_mode)
+        zip_info.external_attr = (new_mode & 0xFFFF) << 16  # Unix attributes
+
+        if stat.S_ISDIR(st_mode):
+            zip_info.external_attr |= 0x10  # MS-DOS directory flag
+
+        if full_path.is_dir():
+            nar.writestr(zip_info, "")
+        else:
+            with full_path.open("rb") as src:
+                src.seek(0)
+                nar.writestr(zip_info, src.read(), compress_type=ZIP_DEFLATED)
