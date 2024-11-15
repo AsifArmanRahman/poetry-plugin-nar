@@ -54,6 +54,38 @@ The plugin extends the existing [build](https://python-poetry.org/docs/cli/#buil
 poetry build -f nar
 ```
 
+
+Optionally, to build a NAR package with matching version and description as the `pyproject.toml` file, you can add the following configuration to the `pyproject.toml` file. The plugin expects the `version` and `description` to be path to a file, where the value of version and description from the `pyproject.toml` file will be placed during build procedure. The file should be in the format of a Python Processor where the `ProcessorDetails` *version* should be set to `__version__` and *description* should be set to `__description__`.
+
+
+```toml
+[tool.nar]
+version = "pretty_print_json/processor.py"
+description = "pretty_print_json/processor.py"
+```
+
+For example, the `processor.py` file for the package `pretty_print_json` would look like the following,
+
+
+```python
+# pretty_print_json/processor.py
+
+.....
+
+class PrettyPrintJson(FlowFileTransform):
+    class Java:
+        implements = [
+            "org.apache.nifi.python.processor.FlowFileTransform"
+        ]
+
+    class ProcessorDetails:
+        version = "__version__"
+        description = "__description__"
+
+    .....
+```
+
+
 <br>
 
 > **Note:**

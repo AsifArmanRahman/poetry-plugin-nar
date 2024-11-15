@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED
 from zipfile import ZipFile
 from zipfile import ZipInfo
+
+import tomlkit
 
 from poetry.core.masonry.builders.builder import Builder
 from poetry.core.masonry.builders.builder import BuildIncludeFile
@@ -132,6 +135,8 @@ class NarBuilder(Builder):
 
             if self._package.requires:
                 self._prepare_dependencies(target_dir, tmp_package_dir)
+
+            self._dynamic_metadata(tmp_package_dir)
 
             with (
                 os.fdopen(fd, "w+b") as fd_file,
@@ -379,3 +384,62 @@ class NarBuilder(Builder):
             with full_path.open("rb") as src:
                 src.seek(0)
                 nar.writestr(zip_info, src.read(), compress_type=ZIP_DEFLATED)
+
+    def _dynamic_metadata(self, nar_package_dir: Path) -> None:
+        config = tomlkit.parse(
+            self._poetry.pyproject_path.read_bytes().decode()
+        )
+
+        version = config.get("tool", {}).get("nar", {}).get("version", None)
+        description = (
+            config.get("tool", {}).get("nar", {}).get("description", None)
+        )
+
+        if version is not None:
+            self._apply_dynamic_update(
+                Path(version),
+                nar_package_dir,
+                r"version(?:\s+|)=(?:\s+|)?[\"']__version__[\"']",
+                f'version = "{self._package.version}"',
+            )
+
+        if description is not None:
+            self._apply_dynamic_update(
+                Path(description),
+                nar_package_dir,
+                r"description(?:\s+|)=(?:\s+|)?[\"']__description__[\"']",
+                f'description = "{self._package.description}"',
+            )
+
+    def _apply_dynamic_update(
+        self,
+        file_path: Path,
+        nar_package_dir: Path,
+        pattern: str,
+        replace: str,
+    ) -> None:
+        files = self.find_files_to_add()
+
+        flag = False
+
+        # sorting everything so the order is stable.
+        for file in sorted(files, key=lambda x: x.path):
+            if file.relative_to_project_root() == file_path:
+                flag = True
+                x = nar_package_dir / file.relative_to_target_root()
+
+                with x.open("r+b") as src:
+                    lines = re.sub(
+                        pattern,
+                        replace,
+                        src.read().decode(),
+                    )
+
+                    src.seek(0)
+                    src.write(lines.encode())
+                    src.truncate()
+
+                break
+
+        if not flag:
+            logger.warning(f"File {file_path} not found in the package")

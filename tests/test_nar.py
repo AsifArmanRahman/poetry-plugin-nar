@@ -173,3 +173,23 @@ def test_build_package_with_restricted_to_nar(
         RuntimeError, match="format must be valid exactly by one definition"
     ):
         project_factory(source=fixture_dir(project))
+
+
+@pytest.mark.parametrize("project", ["dynamic-package"])
+def test_build_package_dynamic_metadata(
+    poetry: Poetry, project_dir: Path
+) -> None:
+    NarBuilder(poetry).build()
+
+    name = distribution_name(poetry.package.name)
+    nar = project_dir / "dist" / f"{name}-{poetry.package.version}.nar"
+
+    assert nar.exists()
+
+    with ZipFile(nar, "r") as file:
+        file.testzip()
+
+        metadata = file.read(f"{name}/processor.py").decode()
+
+        assert f'version = "{poetry.package.version}"' in metadata
+        assert f'description = "{poetry.package.description}"' in metadata

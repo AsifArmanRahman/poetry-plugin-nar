@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "pretty-print-json"
+version = "0.0.1"
+description = "Pretty print JSON"
+authors = ["Mark Payne <markap14@hotmail.com>"]
+license = "Apache-2.0"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+
+[tool.nar]
+version = 'src/pretty_print_json/processor.py'
+description = 'src/pretty_print_json/processor.py'
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
